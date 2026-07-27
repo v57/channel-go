@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+mkdir -p coverage
+
+go test ./... -covermode=atomic -coverprofile=coverage/coverage.out
+
+GCOV2LCOV="$(command -v gcov2lcov || true)"
+if [[ -z "$GCOV2LCOV" ]]; then
+  GOPATH_BIN="$(go env GOPATH)/bin/gcov2lcov"
+  if [[ -x "$GOPATH_BIN" ]]; then
+    GCOV2LCOV="$GOPATH_BIN"
+  fi
+fi
+
+if [[ -z "$GCOV2LCOV" ]]; then
+  echo "gcov2lcov not found. Install with: go install github.com/jandelgado/gcov2lcov@latest"
+  exit 1
+fi
+
+"$GCOV2LCOV" -infile coverage/coverage.out -outfile coverage/lcov.info
+
+if [[ ! -s coverage/lcov.info ]]; then
+  echo "coverage/lcov.info was not generated"
+  exit 1
+fi
+
+echo "LCOV report: coverage/lcov.info"
