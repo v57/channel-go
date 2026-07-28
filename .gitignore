@@ -2,3 +2,10 @@
 /process.test
 /coverage/
 .DS_Store
+
+# Go build and test artifacts
+build/
+*.out
+*.test
+*.prof
+coverage*
