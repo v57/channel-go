@@ -296,7 +296,10 @@ func (c *WebSocketClient) step(state *clientLoopState) error {
 
 	c.flushSharedQueues(state)
 
-	timeout := time.Duration(-1)
+	// Keep a bounded heartbeat even while connected. The wake pipe is the fast
+	// path, but Stop must still make progress if a wake notification is lost
+	// while the poller is transitioning into Wait.
+	timeout := 100 * time.Millisecond
 	if !state.isConnected() {
 		timeout = time.Until(state.nextReconnect)
 		if timeout < 0 {

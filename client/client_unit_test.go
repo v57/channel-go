@@ -144,6 +144,30 @@ func TestWebSocketClientLifecycleCallbacks(t *testing.T) {
 	waitForClient(t, func() bool { return !ws.IsConnected() && closed.Load() > 0 })
 }
 
+func TestConnectedWebSocketClientStopReturns(t *testing.T) {
+	srv, err := server.Listen(channelgo.NewChannel(), 0, server.Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+
+	ws := NewWebSocketClient("ws://"+srv.Addr(), nil)
+	ws.start()
+	waitForClient(t, ws.IsConnected)
+
+	stopped := make(chan struct{})
+	go func() {
+		ws.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatalf("connected client Stop did not return")
+	}
+}
+
 func TestConnectOnConnectCallback(t *testing.T) {
 	srv, err := server.Listen(channelgo.NewChannel().Post("hello", func(channelgo.Body) (any, error) {
 		return "world", nil

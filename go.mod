@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/bytedance/sonic v1.15.0
 	github.com/gobwas/ws v1.4.0
+	golang.org/x/sys v0.22.0
 )
 
 require (
@@ -16,5 +17,4 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/sys v0.22.0 // indirect
 )
