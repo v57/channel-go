@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -27,6 +28,8 @@ type Options struct {
 	Headers   func() map[string]string
 	OnConnect func(sender *channelgo.Sender)
 	OnMessage func(message any)
+	// MaxPayload caps an incoming websocket frame payload in bytes; zero means 16 MiB.
+	MaxPayload int
 }
 
 // ClientSender bundles Sender with its websocket transport.
@@ -62,6 +65,7 @@ func Connect(ch *channelgo.Channel, address any, options Options) *ClientSender 
 	wsClient.channel = ch
 	wsClient.state = map[string]any{}
 	wsClient.OnMessage = options.OnMessage
+	wsClient.MaxPayload = options.MaxPayload
 
 	publicConn := &clientConnection{ws: wsClient}
 	loopConn := &clientConnection{ws: wsClient, loop: true}
@@ -161,6 +165,8 @@ type WebSocketClient struct {
 	OnOpen    func()
 	OnClose   func()
 	OnMessage func(message any)
+	// MaxPayload caps an incoming websocket frame payload in bytes; zero means 16 MiB.
+	MaxPayload int
 
 	running   atomic.Bool
 	connected atomic.Bool
@@ -205,7 +211,6 @@ type clientLoopState struct {
 	readBuf       []byte
 	writeQueue    [][]byte
 	writeOffset   int
-	maskSeed      uint32
 	remoteTopics  map[string]struct{}
 	nextReconnect time.Time
 }
@@ -269,9 +274,9 @@ func (c *WebSocketClient) run() {
 		poller:       p,
 		wakeFD:       int(c.wakeReader.Fd()),
 		readBuf:      make([]byte, 64*1024),
-		maskSeed:     uint32(time.Now().UnixNano()),
 		remoteTopics: make(map[string]struct{}),
 	}
+	state.reader.MaxPayload = c.MaxPayload
 	c.loop = state
 
 	if err := p.Add(state.wakeFD, true, false); err != nil {
@@ -592,9 +597,15 @@ func (c *WebSocketClient) appendBodies(state *clientLoopState, bodies []any, mas
 }
 
 func (c *WebSocketClient) appendFrame(state *clientLoopState, opcode byte, payload []byte, masked bool) {
-	state.maskSeed += 0x9e3779b9
-	state.writeQueue = append(state.writeQueue, wsraw.EncodeFrame(opcode, payload, masked, state.maskSeed))
+	state.writeQueue = append(state.writeQueue, wsraw.EncodeFrame(opcode, payload, masked, randomMaskKey()))
 	_ = c.updatePollerInterest(state)
+}
+
+// randomMaskKey returns an unpredictable masking key (RFC 6455 section 5.3).
+func randomMaskKey() uint32 {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return binary.BigEndian.Uint32(b[:])
 }
 
 func (c *WebSocketClient) updatePollerInterest(state *clientLoopState) error {

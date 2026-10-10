@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,5 +137,106 @@ func TestSubscriptionsAddTopicRemoveBranches(t *testing.T) {
 	}
 	if r2() {
 		t.Fatalf("expected removing missing handler map to return false")
+	}
+}
+
+func TestHeadersOverrideQueryParameters(t *testing.T) {
+	var seen atomic.Value
+	seen.Store("")
+	srv, err := Listen(channelgo.NewChannel(), 0, Options{
+		State: func(headers map[string]string) any {
+			seen.Store(headers["x-user-id"] + "|" + headers["only-query"])
+			return map[string]any{}
+		},
+	})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+
+	dialer := ws.Dialer{Header: ws.HandshakeHeaderHTTP{"X-User-Id": []string{"proxy"}}}
+	conn, _, _, err := dialer.Dial(context.Background(), "ws://"+srv.Addr()+"/?x-user-id=admin&only-query=1")
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+	waitForServer(t, func() bool { return seen.Load().(string) != "" })
+	if got := seen.Load().(string); got != "proxy|1" {
+		t.Fatalf("expected header to win over query, got %q", got)
+	}
+}
+
+func TestServerSurvivesHostileFrames(t *testing.T) {
+	ch := channelgo.NewChannel()
+	ch.Post("echo", func(body channelgo.Body) (any, error) { return body.Body, nil })
+	srv, err := Listen(ch, 0, Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+
+	hostile := [][]byte{
+		{0x81, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 2, 3, 4}, // 2^63-1
+		{0x81, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 2, 3, 4}, // 2^64-1
+		{0x81, 0xff, 0, 0, 0, 0, 0x40, 0, 0, 0, 1, 2, 3, 4},                         // 1 GiB
+	}
+	for i, frame := range hostile {
+		conn, _, _, err := ws.Dialer{}.Dial(context.Background(), "ws://"+srv.Addr())
+		if err != nil {
+			t.Fatalf("case %d: dial failed: %v", i, err)
+		}
+		if _, err := conn.Write(frame); err != nil {
+			t.Fatalf("case %d: write failed: %v", i, err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Read(make([]byte, 16)); err == nil {
+			t.Fatalf("case %d: expected server to close the connection", i)
+		}
+		_ = conn.Close()
+	}
+
+	conn, _, _, err := ws.Dialer{}.Dial(context.Background(), "ws://"+srv.Addr())
+	if err != nil {
+		t.Fatalf("server died after hostile frames: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, []byte(`{"id":1,"path":"echo","body":"ok"}`)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply, err := wsutil.ReadServerText(conn)
+	if err != nil || !bytes.Contains(reply, []byte(`"ok"`)) {
+		t.Fatalf("expected echo reply, got %q err=%v", reply, err)
+	}
+}
+
+func TestServerClosesEndlessHandshake(t *testing.T) {
+	srv, err := Listen(channelgo.NewChannel(), 0, Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+	conn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+	_, _ = conn.Write([]byte("GET / HTTP/1.1\r\nX: "))
+	chunk := bytes.Repeat([]byte("a"), 16*1024)
+	closed := false
+	for i := 0; i < 256; i++ { // up to 4 MiB
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Write(chunk); err != nil {
+			closed = true
+			break
+		}
+	}
+	if !closed {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, err := conn.Read(make([]byte, 1))
+		closed = err != nil
+	}
+	if !closed {
+		t.Fatalf("expected server to close an endless handshake")
 	}
 }

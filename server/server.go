@@ -30,6 +30,9 @@ type Options struct {
 	State        func(headers map[string]string) any
 	OnConnect    func(connection *BodyContext)
 	OnDisconnect func(connection *BodyContext)
+	// MaxPayload caps an incoming websocket frame payload in bytes; zero means 16 MiB.
+	// Larger frames close that connection.
+	MaxPayload int
 }
 
 // Server is a running websocket channel server.
@@ -241,14 +244,16 @@ func (s *Server) acceptLoop(state *serverLoopState) error {
 	for {
 		fd, _, err := unix.Accept(state.listenerFD)
 		if err != nil {
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			switch err {
+			case unix.EAGAIN, unix.EINTR, unix.ECONNABORTED, unix.EMFILE, unix.ENFILE:
+				// Transient or per-connection failures must not stop the whole server.
 				return nil
 			}
 			return err
 		}
 		if err := unix.SetNonblock(fd, true); err != nil {
 			_ = unix.Close(fd)
-			return err
+			continue
 		}
 		conn := &serverConn{
 			server:       s,
@@ -257,11 +262,12 @@ func (s *Server) acceptLoop(state *serverLoopState) error {
 			handshakeBuf: make([]byte, 0, 4096),
 			readBuf:      make([]byte, 64*1024),
 		}
+		conn.reader.MaxPayload = s.options.MaxPayload
 		state.conns[fd] = conn
 		if err := state.poller.Add(fd, true, false); err != nil {
 			delete(state.conns, fd)
 			_ = unix.Close(fd)
-			return err
+			continue
 		}
 	}
 }
@@ -303,16 +309,18 @@ func (s *Server) processHandshake(conn *serverConn) error {
 		return nil
 	}
 
+	// Query parameters first, then real HTTP headers, so headers win (TS server.ts parity).
+	// Otherwise `?x-user-id=admin` could override a header set by an authenticating proxy.
 	headers := make(map[string]string)
-	for key, value := range handshake.Headers {
-		headers[key] = value
-	}
 	if parsed, err := url.Parse(handshake.Path); err == nil {
 		for key, values := range parsed.Query() {
 			if len(values) > 0 {
 				headers[key] = values[len(values)-1]
 			}
 		}
+	}
+	for key, value := range handshake.Headers {
+		headers[key] = value
 	}
 
 	stateValue := any(map[string]any{})

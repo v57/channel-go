@@ -24,6 +24,15 @@ var (
 	ErrContinuationFrame     = errors.New("continuation websocket frames are not supported")
 	ErrInvalidHandshake      = errors.New("invalid websocket handshake")
 	ErrInvalidHandshakeReply = errors.New("invalid websocket handshake reply")
+	ErrFrameTooLarge         = errors.New("websocket frame too large")
+	ErrHandshakeTooLarge     = errors.New("websocket handshake too large")
+)
+
+const (
+	// DefaultMaxPayload caps a single frame payload (matches Bun's default maxPayloadLength).
+	DefaultMaxPayload = 16 << 20
+	// MaxHandshakeSize caps the HTTP upgrade request/response header block.
+	MaxHandshakeSize = 64 << 10
 )
 
 type Frame struct {
@@ -33,6 +42,15 @@ type Frame struct {
 
 type Reader struct {
 	buf []byte
+	// MaxPayload is the largest accepted frame payload; zero means DefaultMaxPayload.
+	MaxPayload int
+}
+
+func (r *Reader) maxPayload() uint64 {
+	if r.MaxPayload > 0 {
+		return uint64(r.MaxPayload)
+	}
+	return DefaultMaxPayload
 }
 
 func (r *Reader) Feed(data []byte) {
@@ -61,26 +79,28 @@ func (r *Reader) Next() (Frame, bool, error) {
 		return Frame{}, false, ErrContinuationFrame
 	}
 
-	payloadLen := int(second & 0x7f)
+	size := uint64(second & 0x7f)
 	offset := 2
-	switch payloadLen {
+	switch size {
 	case 126:
 		if len(r.buf) < offset+2 {
 			return Frame{}, false, nil
 		}
-		payloadLen = int(binary.BigEndian.Uint16(r.buf[offset : offset+2]))
+		size = uint64(binary.BigEndian.Uint16(r.buf[offset : offset+2]))
 		offset += 2
 	case 127:
 		if len(r.buf) < offset+8 {
 			return Frame{}, false, nil
 		}
-		size := binary.BigEndian.Uint64(r.buf[offset : offset+8])
-		if size > uint64(^uint(0)>>1) {
-			return Frame{}, false, fmt.Errorf("websocket frame too large: %d", size)
-		}
-		payloadLen = int(size)
+		size = binary.BigEndian.Uint64(r.buf[offset : offset+8])
 		offset += 8
 	}
+	// Check the declared length before any int conversion or allocation so a hostile
+	// header (e.g. 2^63-1) can neither overflow the arithmetic below nor make us buffer it.
+	if size > r.maxPayload() {
+		return Frame{}, false, fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, size)
+	}
+	payloadLen := int(size)
 
 	masked := second&0x80 != 0
 	maskOffset := 0
@@ -119,7 +139,13 @@ type ServerHandshake struct {
 func ParseServerHandshake(data []byte) (ServerHandshake, int, bool, error) {
 	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
 	if headerEnd < 0 {
+		if len(data) > MaxHandshakeSize {
+			return ServerHandshake{}, 0, false, ErrHandshakeTooLarge
+		}
 		return ServerHandshake{}, 0, false, nil
+	}
+	if headerEnd+4 > MaxHandshakeSize {
+		return ServerHandshake{}, 0, false, ErrHandshakeTooLarge
 	}
 	consumed := headerEnd + 4
 	lines := strings.Split(string(data[:headerEnd]), "\r\n")
@@ -167,7 +193,13 @@ func BuildServerHandshakeResponse(key string) []byte {
 func ParseClientHandshakeResponse(data []byte, expectedAccept string) (int, bool, error) {
 	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
 	if headerEnd < 0 {
+		if len(data) > MaxHandshakeSize {
+			return 0, false, ErrHandshakeTooLarge
+		}
 		return 0, false, nil
+	}
+	if headerEnd+4 > MaxHandshakeSize {
+		return 0, false, ErrHandshakeTooLarge
 	}
 	consumed := headerEnd + 4
 	lines := strings.Split(string(data[:headerEnd]), "\r\n")
