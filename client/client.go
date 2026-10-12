@@ -170,6 +170,9 @@ type WebSocketClient struct {
 
 	running   atomic.Bool
 	connected atomic.Bool
+	// loopGoroutine is the id of the goroutine running the event loop, 0 when
+	// stopped.
+	loopGoroutine atomic.Uint64
 
 	channel      *channelgo.Channel
 	state        any
@@ -255,6 +258,8 @@ func (c *WebSocketClient) start() {
 
 func (c *WebSocketClient) run() {
 	defer close(c.loopDone)
+	c.loopGoroutine.Store(goroutineID())
+	defer c.loopGoroutine.Store(0)
 	defer c.connected.Store(false)
 	defer c.running.Store(false)
 	defer c.cleanupLoopResources()
@@ -301,10 +306,13 @@ func (c *WebSocketClient) step(state *clientLoopState) error {
 
 	c.flushSharedQueues(state)
 
-	// Keep a bounded heartbeat even while connected. The wake pipe is the fast
-	// path, but Stop must still make progress if a wake notification is lost
-	// while the poller is transitioning into Wait.
-	timeout := 100 * time.Millisecond
+	// Callbacks above (OnOpen, response handlers) can run a nested step through
+	// waitWhileLoop, which drains the wake pipe. Re-check before blocking so a
+	// Stop whose wake was consumed there is not missed.
+	if !c.running.Load() {
+		return nil
+	}
+	timeout := time.Duration(-1)
 	if !state.isConnected() {
 		timeout = time.Until(state.nextReconnect)
 		if timeout < 0 {
@@ -890,8 +898,15 @@ type clientConnection struct {
 	loop bool
 }
 
+// onLoop reports whether this loop-bound connection is used from the event-loop
+// goroutine. A loop sender kept by a callback and used later from another
+// goroutine takes the queued, thread-safe path instead of re-entering the loop.
+func (c *clientConnection) onLoop() bool {
+	return c.loop && c.ws.loopGoroutine.Load() == goroutineID()
+}
+
 func (c *clientConnection) Send(body any) int {
-	if c.loop {
+	if c.onLoop() {
 		return c.ws.loopSend(body)
 	}
 	return c.ws.Send(body)
@@ -902,14 +917,14 @@ func (c *clientConnection) Sent(id int) {
 }
 
 func (c *clientConnection) Cancel(id int) bool {
-	if c.loop {
+	if c.onLoop() {
 		return false
 	}
 	return c.ws.Cancel(id)
 }
 
 func (c *clientConnection) Notify(body any) {
-	if c.loop {
+	if c.onLoop() {
 		c.ws.loopNotify(body)
 		return
 	}
@@ -925,11 +940,11 @@ func (c *clientConnection) Stop() {
 }
 
 func (c *clientConnection) InLoop() bool {
-	return c.loop
+	return c.onLoop()
 }
 
 func (c *clientConnection) Wait(ctx context.Context, ready func() bool) error {
-	if !c.loop {
+	if !c.onLoop() {
 		return nil
 	}
 	return c.ws.waitWhileLoop(ctx, ready)

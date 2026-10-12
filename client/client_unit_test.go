@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -272,3 +273,96 @@ func TestClientSenderDelegatesSendHelpers(t *testing.T) {
 }
 
 func strPtrLocalClient(v string) *string { return &v }
+
+// A blocking Send inside OnConnect runs a nested loop step that drains the wake
+// pipe. A Stop landing while that nested step waits for a response used to
+// leave the outer step blocked in the poller forever.
+func TestStopDuringBlockingSendInOnConnect(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	srv, err := server.Listen(channelgo.NewChannel().Post("hello", func(channelgo.Body) (any, error) {
+		requested <- struct{}{}
+		// Hold the response so nothing but Stop's wake can end the nested wait.
+		select {
+		case <-release:
+		case <-done:
+		}
+		return "world", nil
+	}), 0, server.Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+	defer close(done)
+
+	for i := 0; i < 20; i++ {
+		clientConn := Connect(channelgo.NewChannel(), srv.Addr(), Options{
+			OnConnect: func(sender *channelgo.Sender) {
+				_, _ = sender.Send("hello", nil)
+			},
+		})
+		<-requested
+		stopped := make(chan struct{})
+		go func() {
+			clientConn.Sender.Stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: Stop did not return", i)
+		}
+		release <- struct{}{}
+	}
+}
+
+// The sender passed to OnConnect is loop-bound. Kept and used from another
+// goroutine it must take the queued path instead of stepping the loop
+// concurrently (run with -race).
+func TestOnConnectSenderUsedFromAnotherGoroutine(t *testing.T) {
+	srv, err := server.Listen(channelgo.NewChannel().Post("hello", func(channelgo.Body) (any, error) {
+		return "world", nil
+	}), 0, server.Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+
+	senders := make(chan *channelgo.Sender, 1)
+	clientConn := Connect(channelgo.NewChannel(), srv.Addr(), Options{
+		OnConnect: func(sender *channelgo.Sender) {
+			senders <- sender
+		},
+	})
+	defer clientConn.Sender.Stop()
+
+	sender := <-senders
+	done := make(chan error, 4)
+	for range 4 {
+		go func() {
+			for range 50 {
+				value, err := sender.Send("hello", nil)
+				if err != nil {
+					done <- err
+					return
+				}
+				if value != "world" {
+					done <- fmt.Errorf("unexpected response %v", value)
+					return
+				}
+			}
+			done <- nil
+		}()
+	}
+	for range 4 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("sends from a kept OnConnect sender did not complete")
+		}
+	}
+}
