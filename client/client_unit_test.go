@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -364,5 +365,59 @@ func TestOnConnectSenderUsedFromAnotherGoroutine(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("sends from a kept OnConnect sender did not complete")
 		}
+	}
+}
+
+// A long-lived stream handler used to run on the client's event loop and block
+// every other request on that connection (hub-net's net/users stream froze the
+// agent). Handlers now run off the loop.
+func TestOpenStreamHandlerDoesNotBlockConnection(t *testing.T) {
+	serverChannel := channelgo.NewChannel()
+	serverChannel.Post("check", func(body channelgo.Body) (any, error) {
+		values := body.Sender.Values("forever", nil)
+		defer values.Return()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := values.Next(ctx); err != nil {
+			return nil, fmt.Errorf("first stream value: %w", err)
+		}
+		// The stream stays open; the client must still answer a post.
+		return body.Sender.Send("hello", nil)
+	})
+	srv, err := server.Listen(serverChannel, 0, server.Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+
+	clientChannel := channelgo.NewChannel()
+	clientChannel.Post("hello", func(channelgo.Body) (any, error) { return "world", nil })
+	clientChannel.Stream("forever", func(body channelgo.Body, emit channelgo.StreamEmitter) error {
+		if err := emit.Emit("first"); err != nil {
+			return err
+		}
+		for !emit.IsCancelled() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	})
+	clientConn := Connect(clientChannel, srv.Addr(), Options{})
+	defer clientConn.Sender.Stop()
+
+	result := make(chan any, 1)
+	go func() {
+		value, err := clientConn.Sender.Send("check", nil)
+		if err != nil {
+			value = err
+		}
+		result <- value
+	}()
+	select {
+	case value := <-result:
+		if value != "world" {
+			t.Fatalf("check = %v, want world", value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an open stream handler blocked the client connection")
 	}
 }

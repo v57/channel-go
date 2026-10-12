@@ -384,8 +384,12 @@ func TestGoClientServerInteroperability(t *testing.T) {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		if got := fixture.valuesSent.Load(); got != 10 {
-			t.Fatalf("expected mirrored stream handler to drain to 10 values, got %d", got)
+		// Cancelling the mirror cancels the client's stream handler, as in the
+		// TypeScript reference (valuesSent === 3). Go emitters push rather than
+		// being pulled, so a value or two may already be in flight; the handler
+		// must not run to the end (10).
+		if got := fixture.valuesSent.Load(); got < 3 || got >= 10 {
+			t.Fatalf("expected the cancelled client stream handler to stop early, got %d values", got)
 		}
 	})
 

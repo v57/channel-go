@@ -75,8 +75,15 @@ func Connect(ch *channelgo.Channel, address any, options Options) *ClientSender 
 	wsClient.publicSender = publicSender
 	wsClient.loopSender = loopSender
 	wsClient.controller = &channelgo.Controller{
+		// Handlers run off the loop (Async); their responses take the queued
+		// path unless they finish on the loop goroutine.
+		Async: true,
 		ResponseFn: func(body channelgo.Message) {
-			wsClient.loopNotify(body)
+			if wsClient.loopGoroutine.Load() == goroutineID() {
+				wsClient.loopNotify(body)
+				return
+			}
+			wsClient.Notify(body)
 		},
 		SubscribeFn: func(topic string) {
 			wsClient.addRemoteTopic(topic)

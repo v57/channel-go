@@ -342,6 +342,10 @@ func (ch *Channel) receivePath(some Message, controller *Controller) {
 		controller.Response(messageWithBody(*id, body))
 	}
 
+	if controller.Async {
+		go run()
+		return
+	}
 	run()
 }
 
@@ -359,6 +363,10 @@ func (ch *Channel) receiveStream(some Message, controller *Controller) {
 	}
 	id := *some.ID
 
+	if controller.Async {
+		go ch.streamRequest(id, controller, path, some.Body, valueOr(some.Context, map[string]any{}), api)
+		return
+	}
 	ch.streamRequest(id, controller, path, some.Body, valueOr(some.Context, map[string]any{}), api)
 }
 

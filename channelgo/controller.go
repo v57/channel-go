@@ -8,6 +8,11 @@ type Controller struct {
 	EventFn       func(string, any)
 	SenderValue   *Sender
 	StateValue    any
+	// Async runs post and stream handlers on their own goroutine, so a slow
+	// handler or a long-lived stream does not block the transport's event
+	// loop (the TypeScript channel runs handlers asynchronously). ResponseFn
+	// must then be safe to call from any goroutine.
+	Async bool
 }
 
 func (c *Controller) Response(response Message) {
