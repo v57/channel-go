@@ -1,52 +1,19 @@
-# channel-go
+<h1>
+  <img alt="Containerization logo" src="./icon.png" width="70" valign="middle">
+  &nbsp;channel
+</h1>
 
-Go implementation of Channel with:
-- WebSocket client transport
-- WebSocket server transport
-- In-process transport
-- Interop tests against `channel/tests/server.ts` on `127.0.0.1:2049`
+Powerful and lightweight communication built for modern language. Go implementation of Channel: run a websocket server, a websocket client, or communicate inside your process. Typed responses and streaming values are supported out of the box.
 
-Canonical module: `github.com/v57/channel-go`
-
+# Installation
 ```bash
 go get github.com/v57/channel-go
 ```
 
-## Supported platforms
+# Usage
 
-Verified build targets (every push, see CI `build` job):
-
-| OS | Arch |
-| --- | --- |
-| Darwin | `amd64`, `arm64` |
-| Linux | `amd64`, `arm64` |
-
-Windows is not supported. The server transport relies on `golang.org/x/sys/unix`
-(POSIX) APIs with no Windows equivalent; client and process transports also
-target POSIX only. Do not list Windows in release notes.
-
-## Supported toolchain
-
-- Go: `go1.25.0`
-- Bun: `1.3.8`
-- LCOV: `2.4-0`
-
-## Install
-```bash
-brew install go bun lcov
-go install github.com/jandelgado/gcov2lcov@latest
-```
-
-## Package layout
-- `channelgo`: core protocol runtime (`Channel`, `Sender`, `Subscription`, `Values`)
-- `client`: reconnecting WebSocket client transport
-- `server`: WebSocket server transport
-- `process`: in-memory transport
-
-## Quick start
-
-### Server
 ```go
+// Server
 package main
 
 import (
@@ -70,8 +37,8 @@ func main() {
 }
 ```
 
-### Client
 ```go
+// Client
 package main
 
 import (
@@ -93,13 +60,14 @@ func main() {
 }
 ```
 
-If you want a typed response instead of `any`:
+For a typed response instead of `any`:
 
 ```go
 response, err := channelgo.Send[string](conn, "hello", nil)
 ```
 
-### Process
+# Process transport (in-memory)
+
 ```go
 package main
 
@@ -120,7 +88,38 @@ func main() {
 }
 ```
 
-## Scripts
+# Package layout
+- `channelgo`: core protocol runtime (`Channel`, `Sender`, `Subscription`, `Values`)
+- `client`: reconnecting WebSocket client transport
+- `server`: WebSocket server transport
+- `process`: in-memory transport
+
+# Supported platforms
+
+Verified build targets (every push, see CI `build` job):
+
+| OS | Arch |
+| --- | --- |
+| Darwin | `amd64`, `arm64` |
+| Linux | `amd64`, `arm64` |
+
+Windows is not supported. The server transport relies on `golang.org/x/sys/unix`
+(POSIX) APIs with no Windows equivalent; client and process transports also
+target POSIX only. Do not list Windows in release notes.
+
+# Supported toolchain
+
+- Go: `go1.25.0`
+- Bun: `1.3.8`
+- LCOV: `2.4-0`
+
+# Install
+```bash
+brew install go bun lcov
+go install github.com/jandelgado/gcov2lcov@latest
+```
+
+# Scripts
 - `scripts/test`
   - Runs all tests.
   - Integration tests assume TS server is already running on `127.0.0.1:2049`.
@@ -130,7 +129,7 @@ func main() {
 - `scripts/coverage`
   - Produces `coverage/coverage.out` and `coverage/lcov.info`.
 
-## JSON codec policy
+# JSON codec policy
 
 `encoding/json` is the default codec on every platform. This keeps the dependency
 surface and agent binary size predictable. Sonic remains available as an explicit
@@ -152,6 +151,6 @@ Sonic adds 788,160 bytes (24.2%) and 28 codec-specific packages to this
 reference binary. Re-run both commands with the pinned toolchain when updating
 the codec policy or release measurements.
 
-## Notes
+# Notes
 
 - WebSocket transport uses Gobwas (`github.com/gobwas/ws`).
