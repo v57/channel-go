@@ -345,38 +345,6 @@ func (ch *Channel) receivePath(some Message, controller *Controller) {
 	run()
 }
 
-func (ch *Channel) sendInline(path string, body any, contextValue any, controller *Controller) (value any, err error) {
-	if controller == nil {
-		return nil, fmt.Errorf("process connection is closed")
-	}
-
-	sender := controller.Sender()
-	if sender == nil {
-		return nil, fmt.Errorf("process connection is closed")
-	}
-
-	api := ch.lookupPost(path)
-	if api == nil {
-		return nil, fmt.Errorf("api not found")
-	}
-
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			value = nil
-			err = fmt.Errorf("%v", recovered)
-		}
-	}()
-
-	return api(Body{
-		Body:    body,
-		Context: contextValue,
-		Sender:  sender,
-		State:   controller.State(),
-		Path:    path,
-		Task:    nil,
-	})
-}
-
 func (ch *Channel) receiveStream(some Message, controller *Controller) {
 	path := *some.Stream
 	api := ch.lookupStream(path)

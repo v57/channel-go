@@ -16,13 +16,16 @@ type connectionInterface interface {
 	Stop()
 }
 
-type inlineSendConnection interface {
-	LocalController() *Controller
-}
-
 type waitConnection interface {
 	InLoop() bool
 	Wait(ctx context.Context, ready func() bool) error
+}
+
+// closedConnection lets process transports fail fast after Stop without
+// invoking the handler (the honest equivalent of the old inline fast path:
+// it checks connection state only, never bypasses request routing).
+type closedConnection interface {
+	SendClosed() bool
 }
 
 // Sender is a remote execution handle used by handlers and clients.
@@ -44,17 +47,8 @@ func MakeSender(ch *Channel, connection connectionInterface) *Sender {
 }
 
 func (s *Sender) Send(path string, body any, contextValue ...any) (any, error) {
-	var contextBody any
-	if len(contextValue) > 0 {
-		contextBody = contextValue[0]
-	}
-
-	if local, ok := s.connection.(inlineSendConnection); ok {
-		controller := local.LocalController()
-		if controller == nil {
-			return nil, fmt.Errorf("process connection is closed")
-		}
-		return s.ch.sendInline(path, body, contextBody, controller)
+	if closed, ok := s.connection.(closedConnection); ok && closed.SendClosed() {
+		return nil, fmt.Errorf("process connection is closed")
 	}
 
 	request := s.Request(path, body, contextValue...)
@@ -74,15 +68,6 @@ func (s *Sender) SendUntracked(path string, body any, contextValue ...any) {
 		contextBody = contextValue[0]
 	}
 
-	if local, ok := s.connection.(inlineSendConnection); ok {
-		controller := local.LocalController()
-		if controller == nil {
-			return
-		}
-		_, _ = s.ch.sendInline(path, body, contextBody, controller)
-		return
-	}
-
 	id := int(s.fireID.Add(1) - 1)
 	_ = s.connection.Send(Message{
 		ID:      intPtr(id),
@@ -97,21 +82,6 @@ func (s *Sender) SendAsync(path string, body any, onDone func(error), contextVal
 	var contextBody any
 	if len(contextValue) > 0 {
 		contextBody = contextValue[0]
-	}
-
-	if local, ok := s.connection.(inlineSendConnection); ok {
-		controller := local.LocalController()
-		if controller == nil {
-			if onDone != nil {
-				onDone(fmt.Errorf("process connection is closed"))
-			}
-			return
-		}
-		_, err := s.ch.sendInline(path, body, contextBody, controller)
-		if onDone != nil {
-			onDone(err)
-		}
-		return
 	}
 
 	request := s.ch.MakeRequest(path, body, contextBody, func(message Message) {

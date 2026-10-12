@@ -50,6 +50,10 @@ func (i *loopConnection) Send(body any) int {
 	return 0
 }
 
+func (i *loopConnection) SendClosed() bool {
+	return i.closed.Load()
+}
+
 func (i *loopConnection) Sent(int) {}
 
 func (i *loopConnection) Cancel(int) bool {
@@ -66,13 +70,6 @@ func (i *loopConnection) Notify(body any) {
 		return
 	}
 	ch.Receive(body, controller)
-}
-
-func (i *loopConnection) LocalController() *channelgo.Controller {
-	if i.closed.Load() {
-		return nil
-	}
-	return i.controller.Load()
 }
 
 func (i *loopConnection) AddTopic(string, channelgo.EventBody) func() bool {

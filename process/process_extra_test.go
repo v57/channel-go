@@ -138,7 +138,7 @@ func TestProcessSendAfterStopReturnsQuickly(t *testing.T) {
 	}
 }
 
-func TestProcessSendFastPathContextAndTaskDrift(t *testing.T) {
+func TestProcessSendContextAndTask(t *testing.T) {
 	var defaultContext any = "unset"
 	var providedContext any
 	var defaultTask *channelgo.Task
@@ -171,13 +171,16 @@ func TestProcessSendFastPathContextAndTaskDrift(t *testing.T) {
 		t.Fatalf("provided send failed: %v", err)
 	}
 
-	if defaultContext != nil {
-		t.Fatalf("expected nil default context on fast path, got %T %v", defaultContext, defaultContext)
+	// Honest process path: default context is an empty map (the receive-path
+	// default), provided context passes through unchanged, and both requests
+	// carry a real cancellable task (the full request/response machinery).
+	if defaultContext == nil {
+		t.Fatalf("expected default context to be an empty map, got nil")
 	}
 	if providedContext != expectedContext {
 		t.Fatalf("expected provided context to pass through unchanged")
 	}
-	if defaultTask != nil || providedTask != nil {
-		t.Fatalf("expected nil task for process fast path, got default=%v provided=%v", defaultTask, providedTask)
+	if defaultTask == nil || providedTask == nil {
+		t.Fatalf("expected non-nil task for process requests, got default=%v provided=%v", defaultTask, providedTask)
 	}
 }

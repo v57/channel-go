@@ -680,7 +680,7 @@ func runBenchmarkClientFromEnv() error {
 					}
 				} else {
 					budget := 4096
-					for running.Load() && requestsSent < totalRequests && budget > 0 {
+					for running.Load() && requestsSent < totalRequests && inFlight.Load() < maxInFlight && budget > 0 {
 						sendOne()
 						budget--
 					}
