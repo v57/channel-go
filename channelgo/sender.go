@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 )
 
 type connectionInterface interface {
@@ -34,7 +33,6 @@ type Sender struct {
 	requests   *taskStore
 	ch         *Channel
 	connection connectionInterface
-	fireID     atomic.Int64
 }
 
 func MakeSender(ch *Channel, connection connectionInterface) *Sender {
@@ -68,9 +66,10 @@ func (s *Sender) SendUntracked(path string, body any, contextValue ...any) {
 		contextBody = contextValue[0]
 	}
 
-	id := int(s.fireID.Add(1) - 1)
+	// No id: the receiver runs the handler without replying, as the
+	// TypeScript channel does. An id from a separate counter used to collide
+	// with tracked requests, which then received this message's reply.
 	_ = s.connection.Send(Message{
-		ID:      intPtr(id),
 		Path:    strPtr(path),
 		Body:    body,
 		Context: contextBody,

@@ -421,3 +421,37 @@ func TestOpenStreamHandlerDoesNotBlockConnection(t *testing.T) {
 		t.Fatal("an open stream handler blocked the client connection")
 	}
 }
+
+// An untracked send carries no id, so the hub's reply to it can never be
+// matched to a tracked request (hub-service-go's connect updates used to
+// answer the service's first real request with their empty reply).
+func TestUntrackedSendDoesNotAnswerTrackedRequests(t *testing.T) {
+	received := make(chan struct{}, 1)
+	srv, err := server.Listen(channelgo.NewChannel().
+		Post("update", func(channelgo.Body) (any, error) {
+			received <- struct{}{}
+			return nil, nil
+		}).
+		Post("hello", func(channelgo.Body) (any, error) { return "world", nil }), 0, server.Options{})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer srv.Stop()
+
+	connected := make(chan *channelgo.Sender, 1)
+	clientConn := Connect(channelgo.NewChannel(), srv.Addr(), Options{
+		OnConnect: func(sender *channelgo.Sender) {
+			sender.SendUntracked("update", nil)
+			connected <- sender
+		},
+	})
+	defer clientConn.Sender.Stop()
+	<-connected
+	<-received
+	for range 5 {
+		value, err := clientConn.Sender.Send("hello", nil)
+		if err != nil || value != "world" {
+			t.Fatalf("Send after an untracked send = %v, %v", value, err)
+		}
+	}
+}
