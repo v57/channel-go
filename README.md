@@ -88,11 +88,41 @@ func main() {
 }
 ```
 
+# QUIC transport (experimental)
+
+Channel over QUIC, as in the TypeScript reference (`channel/docs/quic.md`): the same messages over one QUIC stream,
+TLS always on, WebSocket stays the default. It is its own module, so only programs that import it depend on
+[quic-go](https://github.com/quic-go/quic-go) (and Go 1.26); the WebSocket transports don't.
+
+```bash
+go get github.com/v57/channel-go/quic
+```
+
+```go
+import (
+  "github.com/v57/channel-go/channelgo"
+  "github.com/v57/channel-go/quic"
+  "github.com/v57/channel-go/server"
+)
+
+// Server: PEM key and certificate, plus the WebSocket server's options
+srv, err := quic.Listen(ch, 4433, quic.ListenOptions{Key: key, Cert: cert, Options: server.Options{State: state}})
+
+// Client: quic://host:port; trust a self-signed certificate with CA, or pin its SHA-256 with Fingerprint
+conn, err := quic.Connect(channelgo.NewChannel(), "quic://127.0.0.1:4433", quic.Options{CA: cert})
+response, err := conn.Send("hello", nil)
+```
+
+`quic.Options` embeds `client.Options` (headers, `OnConnect`, `OnMessage`, `MaxPayload`) and adds `CA`,
+`Fingerprint` and `ServerName`. Without `CA` or `Fingerprint` the server certificate must be trusted by the system.
+The client reconnects every 100 ms like the WebSocket client and sends unanswered requests again.
+
 # Package layout
 - `channelgo`: core protocol runtime (`Channel`, `Sender`, `Subscription`, `Values`)
 - `client`: reconnecting WebSocket client transport
 - `server`: WebSocket server transport
 - `process`: in-memory transport
+- `quic`: QUIC client and server transport, a separate module (`github.com/v57/channel-go/quic`)
 
 # Supported platforms
 
@@ -121,8 +151,9 @@ go install github.com/jandelgado/gcov2lcov@latest
 
 # Scripts
 - `scripts/test`
-  - Runs all tests.
-  - Integration tests assume TS server is already running on `127.0.0.1:2049`.
+  - Runs all tests, the `quic` module's too.
+  - Integration tests assume TS server is already running on `127.0.0.1:2049` (WebSocket on TCP, QUIC on UDP);
+    the QUIC tests also run the TypeScript QUIC client against the Go server when `bun` is installed.
 - `scripts/benchmark`
   - Runs Go benchmark tests (`go test -bench`) and scenario benchmark executable (`bench/main.go`).
   - Includes Go↔Go websocket, Go↔TS websocket, and process benchmarks.
@@ -153,4 +184,5 @@ the codec policy or release measurements.
 
 # Notes
 
-- WebSocket transport uses Gobwas (`github.com/gobwas/ws`).
+- The WebSocket transports use their own RFC 6455 code (`internal/wsraw`), so they need no WebSocket library;
+  Gobwas (`github.com/gobwas/ws`) is used only by tests.

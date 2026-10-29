@@ -7,3 +7,5 @@ hub_run="$(dirname "$0")/../../../HubTools/hub-run"
 cd "$(dirname "$0")/.."
 
 go test ./...
+# The QUIC transport is its own module, so only programs that use it depend on quic-go
+(cd quic && go test ./...)

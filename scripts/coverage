@@ -9,6 +9,9 @@ cd "$(dirname "$0")/.."
 mkdir -p coverage
 
 go test ./... -covermode=atomic -coverprofile=coverage/coverage.out
+# The QUIC transport is its own module
+(cd quic && go test ./... -covermode=atomic -coverprofile=../coverage/quic.out)
+tail -n +2 coverage/quic.out >> coverage/coverage.out
 
 GCOV2LCOV="$(command -v gcov2lcov || true)"
 if [[ -z "$GCOV2LCOV" ]]; then
