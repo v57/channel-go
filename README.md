@@ -117,6 +117,9 @@ response, err := conn.Send("hello", nil)
 `Fingerprint` and `ServerName`. Without `CA` or `Fingerprint` the server certificate must be trusted by the system.
 The client reconnects every 100 ms like the WebSocket client and sends unanswered requests again.
 
+Languages with QUIC: TypeScript, Go, Swift, C#, Rust, Python, Elixir, Java, Kotlin, C and Zig; Dart, Ruby and PHP stay
+on WebSocket (libraries and status in `channel/docs/quic.md`).
+
 # Package layout
 - `channelgo`: core protocol runtime (`Channel`, `Sender`, `Subscription`, `Values`)
 - `client`: reconnecting WebSocket client transport
