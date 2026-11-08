@@ -27,6 +27,26 @@ type closedConnection interface {
 	SendClosed() bool
 }
 
+// sharedConnection is implemented by connections that share one wire with
+// other senders (the WebSocket client's public and loop senders): Wire returns
+// that wire, so its responses answer requests made through any of them.
+type sharedConnection interface {
+	Wire() any
+}
+
+// sameConnection reports whether s and other send on the same wire.
+func (s *Sender) sameConnection(other *Sender) bool {
+	if s == nil || other == nil {
+		return false
+	}
+	if s == other {
+		return true
+	}
+	wire, ok := s.connection.(sharedConnection)
+	otherWire, otherOK := other.connection.(sharedConnection)
+	return ok && otherOK && wire.Wire() == otherWire.Wire()
+}
+
 // Sender is a remote execution handle used by handlers and clients.
 type Sender struct {
 	streams    *iteratorStore

@@ -912,6 +912,12 @@ func (c *clientConnection) onLoop() bool {
 	return c.loop && c.ws.loopGoroutine.Load() == goroutineID()
 }
 
+// Wire is the WebSocket client both of its senders write to, so a response
+// answers requests made through either one.
+func (c *clientConnection) Wire() any {
+	return c.ws
+}
+
 func (c *clientConnection) Send(body any) int {
 	if c.onLoop() {
 		return c.ws.loopSend(body)

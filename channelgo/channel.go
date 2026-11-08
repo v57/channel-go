@@ -266,7 +266,7 @@ func (ch *Channel) ReceiveOne(some Message, controller *Controller) {
 
 	if some.Topic != nil {
 		if some.ID != nil {
-			if request, ok := ch.takeRequest(*some.ID); ok {
+			if request, ok := ch.takeRequest(*some.ID, controller.Sender()); ok {
 				request.response(some)
 			}
 		}
@@ -278,7 +278,7 @@ func (ch *Channel) ReceiveOne(some Message, controller *Controller) {
 
 	if some.ID != nil {
 		id := *some.ID
-		request, ok := ch.getRequest(id)
+		request, ok := ch.getRequest(id, controller.Sender())
 		if !ok {
 			return
 		}
@@ -578,16 +578,24 @@ func (ch *Channel) lookupSubscription(path string) *Subscription {
 	return sub
 }
 
-func (ch *Channel) getRequest(id int) (pendingRequest, bool) {
+// getRequest and takeRequest find a pending request only when its response
+// came in on the connection the request went to. Ids are one counter for every
+// connection, so another peer of a server could otherwise answer, feed or end
+// calls and streams the server sent to someone else.
+func (ch *Channel) getRequest(id int, from *Sender) (pendingRequest, bool) {
 	ch.mu.RLock()
 	request, ok := ch.requests[id]
 	ch.mu.RUnlock()
-	return request, ok
+	if !ok || !request.sender.sameConnection(from) {
+		return pendingRequest{}, false
+	}
+	return request, true
 }
 
-func (ch *Channel) takeRequest(id int) (pendingRequest, bool) {
+func (ch *Channel) takeRequest(id int, from *Sender) (pendingRequest, bool) {
 	ch.mu.Lock()
 	request, ok := ch.requests[id]
+	ok = ok && request.sender.sameConnection(from)
 	if ok {
 		delete(ch.requests, id)
 	}
