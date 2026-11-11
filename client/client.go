@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -19,8 +18,8 @@ import (
 	"github.com/v57/channel-go/channelgo"
 	"github.com/v57/channel-go/internal/jsonx"
 	"github.com/v57/channel-go/internal/poller"
+	"github.com/v57/channel-go/internal/sockio"
 	"github.com/v57/channel-go/internal/wsraw"
-	"golang.org/x/sys/unix"
 )
 
 // Options configures websocket client connection behavior.
@@ -202,8 +201,7 @@ type WebSocketClient struct {
 	subscribed  map[string]map[int]channelgo.EventBody
 	nextTopicID atomic.Int64
 
-	wakeReader *os.File
-	wakeWriter *os.File
+	wakeSignal *sockio.Wake
 
 	loopDone chan struct{}
 
@@ -226,14 +224,8 @@ type clientLoopState struct {
 }
 
 func NewWebSocketClient(address string, headers func() map[string]string) *WebSocketClient {
-	wakeReader, wakeWriter, err := os.Pipe()
+	wakeSignal, err := sockio.NewWake()
 	if err != nil {
-		panic(err)
-	}
-	if err := unix.SetNonblock(int(wakeReader.Fd()), true); err != nil {
-		panic(err)
-	}
-	if err := unix.SetNonblock(int(wakeWriter.Fd()), true); err != nil {
 		panic(err)
 	}
 	return &WebSocketClient{
@@ -241,8 +233,7 @@ func NewWebSocketClient(address string, headers func() map[string]string) *WebSo
 		headers:    headers,
 		pending:    make(map[int]pendingSend),
 		subscribed: make(map[string]map[int]channelgo.EventBody),
-		wakeReader: wakeReader,
-		wakeWriter: wakeWriter,
+		wakeSignal: wakeSignal,
 		loopDone:   make(chan struct{}),
 	}
 }
@@ -284,7 +275,7 @@ func (c *WebSocketClient) run() {
 
 	state := &clientLoopState{
 		poller:       p,
-		wakeFD:       int(c.wakeReader.Fd()),
+		wakeFD:       c.wakeSignal.FD(),
 		readBuf:      make([]byte, 64*1024),
 		remoteTopics: make(map[string]struct{}),
 	}
@@ -334,7 +325,7 @@ func (c *WebSocketClient) step(state *clientLoopState) error {
 	for _, event := range events {
 		switch event.FD {
 		case state.wakeFD:
-			drainFD(state.wakeFD)
+			c.wakeSignal.Drain()
 			c.flushSharedQueues(state)
 		case state.connFD:
 			if event.Readable || event.Error {
@@ -420,7 +411,7 @@ func (c *WebSocketClient) connect(state *clientLoopState) error {
 			_ = conn.Close()
 			return err
 		}
-		if err := unix.SetNonblock(fd, true); err != nil {
+		if err := sockio.SetNonblock(fd); err != nil {
 			_ = conn.Close()
 			return err
 		}
@@ -490,7 +481,7 @@ func (c *WebSocketClient) disconnect(state *clientLoopState, invokeClose bool, p
 
 func (c *WebSocketClient) handleReadable(state *clientLoopState) error {
 	for {
-		n, err := unix.Read(state.connFD, state.readBuf)
+		n, err := sockio.Read(state.connFD, state.readBuf)
 		if n > 0 {
 			state.reader.Feed(state.readBuf[:n])
 			if err := c.processFrames(state); err != nil {
@@ -498,7 +489,7 @@ func (c *WebSocketClient) handleReadable(state *clientLoopState) error {
 			}
 		}
 		if err != nil {
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			if sockio.WouldBlock(err) {
 				return nil
 			}
 			return err
@@ -547,7 +538,7 @@ func (c *WebSocketClient) flushWrites(state *clientLoopState) error {
 		if state.writeOffset > 0 {
 			current = current[state.writeOffset:]
 		}
-		n, err := unix.Write(state.connFD, current)
+		n, err := sockio.Write(state.connFD, current)
 		if n > 0 {
 			state.writeOffset += n
 			if state.writeOffset >= len(state.writeQueue[0]) {
@@ -556,7 +547,7 @@ func (c *WebSocketClient) flushWrites(state *clientLoopState) error {
 			}
 		}
 		if err != nil {
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			if sockio.WouldBlock(err) {
 				break
 			}
 			return err
@@ -781,21 +772,17 @@ func (c *WebSocketClient) waitWhileLoop(ctx context.Context, ready func() bool) 
 }
 
 func (c *WebSocketClient) wake() {
-	if c.wakeWriter == nil {
+	if c.wakeSignal == nil {
 		return
 	}
-	_, _ = c.wakeWriter.Write([]byte{1})
+	c.wakeSignal.Signal()
 }
 
 func (c *WebSocketClient) cleanupLoopResources() {
 	c.loop = nil
-	if c.wakeReader != nil {
-		_ = c.wakeReader.Close()
-		c.wakeReader = nil
-	}
-	if c.wakeWriter != nil {
-		_ = c.wakeWriter.Close()
-		c.wakeWriter = nil
+	if c.wakeSignal != nil {
+		_ = c.wakeSignal.Close()
+		c.wakeSignal = nil
 	}
 }
 
@@ -1090,11 +1077,6 @@ func socketFD(conn net.Conn) (int, error) {
 		return 0, fmt.Errorf("missing connection fd")
 	}
 	return fd, nil
-}
-
-func drainFD(fd int) {
-	buffer := [256]byte{}
-	_, _ = unix.Read(fd, buffer[:])
 }
 
 func encodeBase64(value []byte) string {

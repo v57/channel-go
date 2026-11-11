@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -27,6 +28,9 @@ func TestParseWorkerMessage(t *testing.T) {
 }
 
 func TestSampleProcessUsage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the process benchmark samples usage with ps, which Windows doesn't have")
+	}
 	usage, err := sampleProcessUsage(os.Getpid())
 	if err != nil {
 		t.Fatalf("unexpected sample usage error: %v", err)

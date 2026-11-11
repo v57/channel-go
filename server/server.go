@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,8 +13,8 @@ import (
 	"github.com/v57/channel-go/channelgo"
 	"github.com/v57/channel-go/internal/jsonx"
 	"github.com/v57/channel-go/internal/poller"
+	"github.com/v57/channel-go/internal/sockio"
 	"github.com/v57/channel-go/internal/wsraw"
-	"golang.org/x/sys/unix"
 )
 
 // BodyContext provides per-connection context for hooks.
@@ -47,8 +46,7 @@ type Server struct {
 	running  atomic.Bool
 	stopOnce sync.Once
 
-	wakeReader *os.File
-	wakeWriter *os.File
+	wakeSignal *sockio.Wake
 
 	publishMu    sync.Mutex
 	publishQueue []channelgo.SubscriptionEvent
@@ -102,25 +100,13 @@ func Listen(ch *channelgo.Channel, address any, options Options) (*Server, error
 		_ = tcpListener.Close()
 		return nil, err
 	}
-	if err := unix.SetNonblock(fd, true); err != nil {
+	if err := sockio.SetNonblock(fd); err != nil {
 		_ = tcpListener.Close()
 		return nil, err
 	}
 
-	wakeReader, wakeWriter, err := os.Pipe()
+	wakeSignal, err := sockio.NewWake()
 	if err != nil {
-		_ = tcpListener.Close()
-		return nil, err
-	}
-	if err := unix.SetNonblock(int(wakeReader.Fd()), true); err != nil {
-		_ = wakeReader.Close()
-		_ = wakeWriter.Close()
-		_ = tcpListener.Close()
-		return nil, err
-	}
-	if err := unix.SetNonblock(int(wakeWriter.Fd()), true); err != nil {
-		_ = wakeReader.Close()
-		_ = wakeWriter.Close()
 		_ = tcpListener.Close()
 		return nil, err
 	}
@@ -131,8 +117,7 @@ func Listen(ch *channelgo.Channel, address any, options Options) (*Server, error
 		addr:       tcpListener.Addr().String(),
 		listener:   tcpListener,
 		loopDone:   make(chan struct{}),
-		wakeReader: wakeReader,
-		wakeWriter: wakeWriter,
+		wakeSignal: wakeSignal,
 	}
 
 	publisher := &brokerPublisher{server: srv}
@@ -157,13 +142,9 @@ func (s *Server) run(listenerFD int) {
 		if s.cleanup != nil {
 			s.cleanup()
 		}
-		if s.wakeReader != nil {
-			_ = s.wakeReader.Close()
-			s.wakeReader = nil
-		}
-		if s.wakeWriter != nil {
-			_ = s.wakeWriter.Close()
-			s.wakeWriter = nil
+		if s.wakeSignal != nil {
+			_ = s.wakeSignal.Close()
+			s.wakeSignal = nil
 		}
 		if s.listener != nil {
 			_ = s.listener.Close()
@@ -178,7 +159,7 @@ func (s *Server) run(listenerFD int) {
 
 	state := &serverLoopState{
 		poller:     p,
-		wakeFD:     int(s.wakeReader.Fd()),
+		wakeFD:     s.wakeSignal.FD(),
 		listenerFD: listenerFD,
 		conns:      make(map[int]*serverConn),
 		broker:     make(map[string]map[int]*serverConn),
@@ -211,7 +192,7 @@ func (s *Server) step(state *serverLoopState) error {
 	for _, event := range events {
 		switch event.FD {
 		case state.wakeFD:
-			drainFD(state.wakeFD)
+			s.wakeSignal.Drain()
 			s.flushPublishQueue(state)
 		case state.listenerFD:
 			if event.Readable || event.Error {
@@ -242,17 +223,16 @@ func (s *Server) step(state *serverLoopState) error {
 
 func (s *Server) acceptLoop(state *serverLoopState) error {
 	for {
-		fd, _, err := unix.Accept(state.listenerFD)
+		fd, err := sockio.Accept(state.listenerFD)
 		if err != nil {
-			switch err {
-			case unix.EAGAIN, unix.EINTR, unix.ECONNABORTED, unix.EMFILE, unix.ENFILE:
+			if sockio.AcceptRetry(err) {
 				// Transient or per-connection failures must not stop the whole server.
 				return nil
 			}
 			return err
 		}
-		if err := unix.SetNonblock(fd, true); err != nil {
-			_ = unix.Close(fd)
+		if err := sockio.SetNonblock(fd); err != nil {
+			_ = sockio.Close(fd)
 			continue
 		}
 		conn := &serverConn{
@@ -266,7 +246,7 @@ func (s *Server) acceptLoop(state *serverLoopState) error {
 		state.conns[fd] = conn
 		if err := state.poller.Add(fd, true, false); err != nil {
 			delete(state.conns, fd)
-			_ = unix.Close(fd)
+			_ = sockio.Close(fd)
 			continue
 		}
 	}
@@ -274,7 +254,7 @@ func (s *Server) acceptLoop(state *serverLoopState) error {
 
 func (s *Server) handleReadable(conn *serverConn) error {
 	for {
-		n, err := unix.Read(conn.fd, conn.readBuf)
+		n, err := sockio.Read(conn.fd, conn.readBuf)
 		if n > 0 {
 			if !conn.handshaken {
 				conn.handshakeBuf = append(conn.handshakeBuf, conn.readBuf[:n]...)
@@ -289,7 +269,7 @@ func (s *Server) handleReadable(conn *serverConn) error {
 			}
 		}
 		if err != nil {
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			if sockio.WouldBlock(err) {
 				return nil
 			}
 			return err
@@ -437,7 +417,7 @@ func (s *Server) flushWrites(conn *serverConn) error {
 		if conn.writeOffset > 0 {
 			current = current[conn.writeOffset:]
 		}
-		n, err := unix.Write(conn.fd, current)
+		n, err := sockio.Write(conn.fd, current)
 		if n > 0 {
 			conn.writeOffset += n
 			if conn.writeOffset >= len(conn.writeQueue[0]) {
@@ -446,7 +426,7 @@ func (s *Server) flushWrites(conn *serverConn) error {
 			}
 		}
 		if err != nil {
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			if sockio.WouldBlock(err) {
 				break
 			}
 			return err
@@ -504,7 +484,7 @@ func (s *Server) closeConn(conn *serverConn) {
 	if s.options.OnDisconnect != nil && conn.context != nil {
 		s.options.OnDisconnect(conn.context)
 	}
-	_ = unix.Close(conn.fd)
+	_ = sockio.Close(conn.fd)
 }
 
 func (s *Server) closeAll(state *serverLoopState) {
@@ -585,10 +565,10 @@ func (s *Server) PublishEvent(event channelgo.SubscriptionEvent) {
 }
 
 func (s *Server) wake() {
-	if s.wakeWriter == nil {
+	if s.wakeSignal == nil {
 		return
 	}
-	_, _ = s.wakeWriter.Write([]byte{1})
+	s.wakeSignal.Signal()
 }
 
 func resolveAddress(address any) (host, port string) {
@@ -753,9 +733,4 @@ func socketFD(listener *net.TCPListener) (int, error) {
 		return 0, fmt.Errorf("missing listener fd")
 	}
 	return fd, nil
-}
-
-func drainFD(fd int) {
-	buffer := [256]byte{}
-	_, _ = unix.Read(fd, buffer[:])
 }
